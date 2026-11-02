@@ -20,6 +20,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING, Union
 from urllib.parse import urlparse, parse_qs, urlunparse
@@ -6311,15 +6312,14 @@ def _get_task_extra_body(task: str) -> dict[str, Any]:
     return result
 
 
-# Per-task concurrency limiting: many sessions can spawn unbounded background aux calls, each
-# retrying across the fallback chain during incidents.
-# During provider incidents each call also retries / fans out across the fallback chain, multiplying request
-# volume on already-degraded endpoints. A per-task semaphore caps in-flight calls so retry amplification
+# Per-task concurrency limiting: many sessions can spawn background aux calls, and during provider incidents
+# each retries / fans out across the fallback chain, multiplying request volume on already-degraded endpoints. A per-task semaphore caps in-flight calls so retry amplification
 # stays bounded. See #23324.
 # Keyed by profile home as well: the limit is the profile's ``auxiliary.<task>.max_concurrency``, and two
-# multiplexed profiles with different limits would otherwise rebuild (and reset) one shared semaphore.
+# multiplexed profiles with different limits would otherwise rebuild (and reset) one shared semaphore. Async ones
+# are held per event loop, weakly: a closed loop's go with it, and a loop reusing a dead one's id() never gets them.
 _aux_sync_semaphores: dict[tuple[str, str], tuple[int, threading.BoundedSemaphore]] = {}
-_aux_async_semaphores: dict[tuple[str, str, int], tuple[int, Any]] = {}
+_aux_async_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()  # loop -> {(home, task): (limit, sem)}
 _aux_sem_lock = threading.Lock()
 
 
@@ -6364,7 +6364,7 @@ def _acquire_async_aux_semaphore(task: Optional[str]):
     except RuntimeError:
         return None
     from hermes_constants import hermes_home_key
-    return _cached_semaphore(_aux_async_semaphores, (hermes_home_key(), task, id(loop)), limit, asyncio.Semaphore)
+    return _cached_semaphore(_aux_async_semaphores.setdefault(loop, {}), (hermes_home_key(), task), limit, asyncio.Semaphore)
 
 
 def _reset_aux_semaphores() -> None:

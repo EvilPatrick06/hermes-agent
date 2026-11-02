@@ -130,10 +130,12 @@ def _xai_finalize_catalog(ids: list[str]) -> list[str]:
 
 def _xai_curated_models() -> list[str]:
     """Offline curated floor for xAI / xAI OAuth pickers: $HERMES_HOME/models_dev_cache.json
-    (no network), else ``_XAI_STATIC_FALLBACK``. Any failure falls through to the static list."""
+    (no network), else ``_XAI_STATIC_FALLBACK``. Any failure falls through to the static list.
+    Reads through the process-wide models.dev copy: a private disk parse here was a second full
+    parse of the whole catalog (tens of MiB at peak) thrown away after reading one provider."""
     try:
-        from agent.models_dev import _load_disk_cache
-        data = _load_disk_cache()
+        from agent.models_dev import fetch_models_dev
+        data = fetch_models_dev(allow_network=False)
         xai = data.get("xai") if isinstance(data, dict) else None
         models = xai.get("models") if isinstance(xai, dict) else None
         if isinstance(models, dict) and models:
