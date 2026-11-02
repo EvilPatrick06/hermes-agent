@@ -1138,8 +1138,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onThreadMessagesChange: handleThreadMessagesChange,
     onToggleSelectedPin: toggleSelectedPin,
     onTranscribeAudio: transcribeVoiceAudio,
-    onTriggerCronJob: jobId =>
-      triggerAndRefreshCronJobs(jobId, profileScope === ALL_PROFILES ? 'all' : profileScope)
+    onTriggerCronJob: job =>
+      triggerAndRefreshCronJobs(job, profileScope === ALL_PROFILES ? 'all' : profileScope)
         .then(() => undefined)
         .catch(() => undefined),
     followDefaultModel,

@@ -1,4 +1,4 @@
-import { type CronJob, getApiRequestConnection, getCronJobs, triggerCronJob } from '@/hermes'
+import { type CronJob, type CronJobRef, getApiRequestConnection, getCronJobs, triggerCronJob } from '@/hermes'
 import {
   beginCronJobsAction,
   beginCronJobsRequest,
@@ -88,10 +88,10 @@ export async function mutateAndRefreshCronJobs<T>(
  * the trigger already succeeded and must not be shown as failed.
  */
 export async function triggerAndRefreshCronJobs(
-  jobId: string,
+  job: CronJobRef,
   profile: 'all' | string
 ): Promise<CronTriggerRefreshResult> {
-  const { value: _value, ...result } = await mutateAndRefreshCronJobs(profile, () => triggerCronJob(jobId))
+  const { value: _value, ...result } = await mutateAndRefreshCronJobs(profile, () => triggerCronJob(job))
 
   return result
 }

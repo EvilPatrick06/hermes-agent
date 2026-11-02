@@ -84,6 +84,16 @@ export const setCronJobs = (jobs: CronJob[]) => {
   $cronJobs.set(jobs)
 }
 
+/** A job's identity in the unified list: two gateways can hold the same id,
+ *  so the connection that listed it is part of who it is. */
+export const cronJobKey = (job: Pick<CronJob, 'connection_id' | 'id'>): string =>
+  `${job.connection_id ?? ''}\u0000${job.id}`
+
+/** A per-job response comes from the job's own backend, which knows nothing of
+ *  the Desktop's connection ids; keep the listing's tag on the replacement row. */
+export const withListedConnection = (listed: Pick<CronJob, 'connection_id'>, updated: CronJob): CronJob =>
+  listed.connection_id ? { ...updated, connection_id: listed.connection_id } : updated
+
 // In-place edit so the cron overlay's mutations (create/edit/delete/pause/…)
 // land in the same atom the sidebar renders — no stale list until the next poll.
 export const updateCronJobs = (fn: (jobs: CronJob[]) => CronJob[]) => {

@@ -1051,6 +1051,10 @@ export interface AnalyticsTotals {
 export interface CronJob {
   /** Missed-run policy: true runs one catch-up, false skips; null/absent follows the default. */
   catch_up?: boolean | null
+  /** The registry gateway that serves this job, stamped by the unified list
+   *  when the job comes from a connection other than the one in front.
+   *  Absent: the connection in front owns it. */
+  connection_id?: string
   deliver?: null | string
   enabled: boolean
   id: string
@@ -1064,6 +1068,8 @@ export interface CronJob {
   name?: null | string
   next_run_at?: null | string
   no_agent?: boolean
+  /** The profile whose cron store holds the job (the backend annotates every listed job). */
+  profile?: null | string
   prompt?: null | string
   provider?: null | string
   schedule?: CronJobSchedule

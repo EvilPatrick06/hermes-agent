@@ -13,6 +13,7 @@ import {
   connectionScoped,
   getApiRequestConnection,
   hermesApi,
+  ownerScoped,
   profileScoped,
   STARTUP_REQUEST_TIMEOUT_MS
 } from './client'
@@ -22,6 +23,35 @@ import {
 // longer than the Electron fetch default; keep this override local to the one
 // synchronous long-operation endpoint rather than weakening all API timeouts.
 const CRON_TRIGGER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000
+
+/** A job the caller holds: its id alone (the connection in front owns it), or
+ *  the listed row, whose `connection_id` names the registry gateway that
+ *  serves it when the unified list spliced it in from another connection. */
+export type CronJobRef = Pick<CronJob, 'connection_id' | 'id' | 'profile'> | string
+
+const cronJobId = (job: CronJobRef): string => (typeof job === 'string' ? job : job.id)
+
+/** The registry connection that listed `job`; empty for the connection in front. */
+const listedConnection = (job: CronJobRef): string =>
+  typeof job === 'string' ? '' : String(job.connection_id ?? '').trim()
+
+/** The connection a job's runs belong to, for stamping their rows. */
+function cronJobConnection(job: CronJobRef): null | string {
+  return listedConnection(job) || getApiRequestConnection()
+}
+
+/** Every per-job call goes to the backend that listed the job. A job spliced
+ *  in from another connection carries that connection and its own profile; an
+ *  untagged one belongs to the connection in front, as before. */
+function cronJobScope(job: CronJobRef): { connectionId?: string; priority?: 'foreground'; profile?: string } {
+  const connectionId = listedConnection(job)
+
+  if (!connectionId || typeof job === 'string') {
+    return { ...profileScoped(), ...connectionScoped() }
+  }
+
+  return ownerScoped({ connectionId, profile: job.profile || undefined })
+}
 
 // Cron jobs are stored per-profile (<HERMES_HOME>/cron/jobs.json), and the
 // backend's list endpoint defaults to 'all'. Pass a concrete profile key to
@@ -39,19 +69,17 @@ export function getCronJobs(profile?: string): Promise<CronJob[]> {
   })
 }
 
-export function getCronJob(jobId: string): Promise<CronJob> {
+export function getCronJob(job: CronJobRef): Promise<CronJob> {
   return hermesApi<CronJob>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`
   })
 }
 
-export async function getCronJobRuns(jobId: string, limit = 20): Promise<SessionInfo[]> {
+export async function getCronJobRuns(job: CronJobRef, limit = 20): Promise<SessionInfo[]> {
   const { runs } = await hermesApi<{ runs: SessionInfo[] }>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/runs?limit=${limit}`
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/runs?limit=${limit}`
   })
 
   // Run rows are backend-returned sessions like any other page, so they carry
@@ -63,7 +91,7 @@ export async function getCronJobRuns(jobId: string, limit = 20): Promise<Session
   // id-only resume and the transcript never loaded (#82527). The backend
   // stamps `profile` (the job's owning profile); this adds the connection
   // half, exactly as /api/sessions and the sidebar slices do.
-  return stampRowsWithOwningConnection(runs ?? [], getApiRequestConnection())
+  return stampRowsWithOwningConnection(runs ?? [], cronJobConnection(job))
 }
 
 // The single source of truth for cron delivery targets (local + configured
@@ -89,39 +117,35 @@ export function createCronJob(body: CronJobCreatePayload): Promise<CronJob> {
   })
 }
 
-export function updateCronJob(jobId: string, updates: CronJobUpdates): Promise<CronJob> {
+export function updateCronJob(job: CronJobRef, updates: CronJobUpdates): Promise<CronJob> {
   return hermesApi<CronJob>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`,
     method: 'PUT',
     body: { updates }
   })
 }
 
-export function pauseCronJob(jobId: string): Promise<CronJob> {
+export function pauseCronJob(job: CronJobRef): Promise<CronJob> {
   return hermesApi<CronJob>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/pause`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/pause`,
     method: 'POST'
   })
 }
 
-export function resumeCronJob(jobId: string): Promise<CronJob> {
+export function resumeCronJob(job: CronJobRef): Promise<CronJob> {
   return hermesApi<CronJob>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/resume`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/resume`,
     method: 'POST'
   })
 }
 
-export function triggerCronJob(jobId: string): Promise<CronJob> {
+export function triggerCronJob(job: CronJobRef): Promise<CronJob> {
   return hermesApi<CronJob>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/trigger`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/trigger`,
     method: 'POST',
     timeoutMs: CRON_TRIGGER_REQUEST_TIMEOUT_MS
   })
@@ -129,20 +153,18 @@ export function triggerCronJob(jobId: string): Promise<CronJob> {
 
 // Asks the job's live run to stop; the run books a 'cancelled' attempt at its next cancel
 // check (a second or two), so callers poll the job list for the ledger to settle.
-export function cancelCronJobRun(jobId: string): Promise<CronCancelResult> {
+export function cancelCronJobRun(job: CronJobRef): Promise<CronCancelResult> {
   return hermesApi<CronCancelResult>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/cancel`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/cancel`,
     method: 'POST'
   })
 }
 
-export function deleteCronJob(jobId: string): Promise<{ ok: boolean }> {
+export function deleteCronJob(job: CronJobRef): Promise<{ ok: boolean }> {
   return hermesApi<{ ok: boolean }>({
-    ...profileScoped(),
-    ...connectionScoped(),
-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`,
+    ...cronJobScope(job),
+    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`,
     method: 'DELETE'
   })
 }

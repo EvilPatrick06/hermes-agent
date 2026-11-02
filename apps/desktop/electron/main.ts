@@ -215,6 +215,7 @@ import type { RegistryConnection } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
+import { isAllProfilesCronListRequest, mergeRegistryCronJobs } from './cron-job-union'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
 import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
@@ -16017,7 +16018,37 @@ async function teardownConnectionScopedProfileBackend(connectionId, profile) {
   ])
 }
 
+// The Scheduled jobs list across every connected gateway: the front
+// connection's own answer, then each other CONNECTED registry gateway's jobs,
+// each tagged with the connection that serves it so its per-job calls route
+// there (cron-job-union.ts). Before this the list asked only the connection in
+// front, so a Bot's jobs on an SSH host never showed while you read a chat on
+// another connection. Same never-dial sources as the unified Sessions list.
 async function handleHermesApiRequest(request) {
+  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
+    return handleFrontHermesApiRequest(request)
+  }
+
+  const own = await handleFrontHermesApiRequest(request)
+  const registryConnectionId = apiRequestRegistryConnectionId(request)
+
+  const sources = await pooledRegistrySessionSources(
+    shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
+  )
+
+  const frontBackendId = registryConnectionId
+    ? sources.find(source => source.connectionId === registryConnectionId)?.backendId
+    : await primaryBackendInstallId()
+
+  return mergeRegistryCronJobs(
+    own,
+    sources,
+    (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 }),
+    { backendId: frontBackendId, connectionId: registryConnectionId || null }
+  )
+}
+
+async function handleFrontHermesApiRequest(request) {
   // Registry-pinned request (request.connectionId): the renderer is working
   // against a REGISTERED gateway connection, so the data — cron jobs and their
   // run sessions included — lives in THAT host's state.db, not any local

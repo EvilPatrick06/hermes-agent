@@ -150,7 +150,7 @@ export function useCronRunStop({ c, jobs, profile, watch }: CronRunStopOptions):
       publish()
 
       try {
-        const { jobs: refreshed, value } = await mutateAndRefreshCronJobs(profile, () => cancelCronJobRun(job.id))
+        const { jobs: refreshed, value } = await mutateAndRefreshCronJobs(profile, () => cancelCronJobRun(job))
 
         if (value && !value.cancelled) {
           stoppingRef.current.delete(job.id)
