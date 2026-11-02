@@ -167,3 +167,34 @@ export async function mergeRegistryCronJobs(
 
   return merged
 }
+
+export interface CronUnionDeps {
+  /** The connection in front's own answer to the request. */
+  front: (request: any) => Promise<unknown>
+  registryConnectionId: (request: any) => null | string | undefined
+  /** The pooled registry gateways read beside that connection; never dials. */
+  pooledSources: (registryConnectionId: null | string | undefined) => Promise<CronUnionSource[]>
+  /** The unpinned primary's install_id, when known. */
+  primaryBackendId: () => Promise<null | string | undefined>
+  getJson: GetJson
+}
+
+/** Answer a Hermes API request as the front connection does; the all-profiles
+ *  job list also gets every connected gateway's jobs, each tagged with its
+ *  connection. */
+export async function answerWithEveryGatewaysCronJobs(request: any, deps: CronUnionDeps): Promise<unknown> {
+  const own = await deps.front(request)
+
+  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
+    return own
+  }
+
+  const connectionId = deps.registryConnectionId(request) || null
+  const sources = await deps.pooledSources(connectionId)
+
+  const backendId = connectionId
+    ? sources.find(source => source.connectionId === connectionId)?.backendId
+    : await deps.primaryBackendId()
+
+  return mergeRegistryCronJobs(own, sources, deps.getJson, { backendId, connectionId })
+}

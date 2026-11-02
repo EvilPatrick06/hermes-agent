@@ -9,7 +9,13 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { type CronUnionSource, isAllProfilesCronListRequest, mergeRegistryCronJobs, otherCronSources } from './cron-job-union'
+import {
+  answerWithEveryGatewaysCronJobs,
+  type CronUnionSource,
+  isAllProfilesCronListRequest,
+  mergeRegistryCronJobs,
+  otherCronSources
+} from './cron-job-union'
 
 const source = (connectionId: string, backendId?: string, descriptors = [connectionId]): CronUnionSource => ({
   backendId,
@@ -142,4 +148,58 @@ test('each job is listed once per (connection, profile, id); "unknown" ids are n
     { connection_id: 'bots', id: 'unknown' },
     { connection_id: 'bots', id: 'unknown' }
   ])
+})
+
+function unionDeps(front: unknown, sources: CronUnionSource[], answers: Record<string, unknown>) {
+  const reads = { pooled: 0, primary: 0 }
+  const { calls, getJson } = jsonFrom(answers)
+
+  const deps = {
+    front: async () => front,
+    registryConnectionId: (request: any) => request?.connectionId,
+    pooledSources: async () => {
+      reads.pooled += 1
+
+      return sources
+    },
+    primaryBackendId: async () => {
+      reads.primary += 1
+
+      return 'one'
+    },
+    getJson
+  }
+
+  return { calls, deps, reads }
+}
+
+test('any other request gets the front answer and reads no other gateway', async () => {
+  const { calls, deps, reads } = unionDeps({ ok: true }, [source('bots', 'vm')], {})
+
+  assert.deepEqual(await answerWithEveryGatewaysCronJobs({ method: 'GET', path: '/api/cron/jobs/x' }, deps), { ok: true })
+  assert.deepEqual(reads, { pooled: 0, primary: 0 })
+  assert.equal(calls.length, 0)
+})
+
+test("the unpinned front skips the gateway that is the primary's own backend", async () => {
+  const { deps, reads } = unionDeps([{ id: 'mine' }], [source('local', 'one'), source('bots', 'vm')], {
+    bots: [{ id: 'review', profile: 'bramble' }],
+    local: [{ id: 'mine' }]
+  })
+
+  const merged = await answerWithEveryGatewaysCronJobs({ path: '/api/cron/jobs?profile=all' }, deps)
+
+  assert.deepEqual(merged, [{ id: 'mine' }, { connection_id: 'bots', id: 'review', profile: 'bramble' }])
+  assert.deepEqual(reads, { pooled: 1, primary: 1 })
+})
+
+test("a pinned front is matched by its own source's install_id", async () => {
+  const { deps, reads } = unionDeps([{ id: 'review', profile: 'bramble' }], [source('bots', 'vm'), source('same', 'vm')], {
+    same: [{ id: 'review', profile: 'bramble' }]
+  })
+
+  const merged = await answerWithEveryGatewaysCronJobs({ connectionId: 'bots', path: '/api/cron/jobs' }, deps)
+
+  assert.deepEqual(merged, [{ id: 'review', profile: 'bramble' }])
+  assert.equal(reads.primary, 0)
 })

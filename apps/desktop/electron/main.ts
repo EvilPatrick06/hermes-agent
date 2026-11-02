@@ -194,7 +194,6 @@ import {
   reconcileAppliedGlobalConnection,
   reconcileRegistryDrift,
   registryDialConnectionId,
-  registrySourceOwnsPrimaryBackend,
   rememberSshEnumeration,
   removeConnection,
   type ResolvedConnectionDescriptor,
@@ -215,7 +214,7 @@ import type { RegistryConnection } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
-import { isAllProfilesCronListRequest, mergeRegistryCronJobs } from './cron-job-union'
+import { answerWithEveryGatewaysCronJobs } from './cron-job-union'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
 import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
@@ -513,7 +512,7 @@ import {
   probeCachedConnectionInstallId,
   rememberConnectionInstallId
 } from './registry-backend-identity'
-import { collectRegistrySessionSources } from './registry-session-sources'
+import { collectRegistrySessionSources, reusedPrimarySshDescriptor } from './registry-session-sources'
 import { releaseHolderRetry } from './release-holder-consent'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
@@ -15635,9 +15634,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
   if (method === 'GET' && pathname === '/api/profiles/sessions') {
     const remoteProfiles = configuredRemoteProfileNames()
 
-    const registrySources = await pooledRegistrySessionSources(
-      shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
-    )
+    const registrySources = await pooledRegistrySourcesBeside(registryConnectionId)
 
     if (remoteProfiles.length === 0 && registrySources.length === 0) {
       return undefined // no remote profiles and no connected registry gateways → local fast path
@@ -15671,9 +15668,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId = 
   if (method === 'GET' && pathname === '/api/profiles/sessions/sidebar') {
     const remoteProfiles = configuredRemoteProfileNames()
 
-    const registrySources = await pooledRegistrySessionSources(
-      shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
-    )
+    const registrySources = await pooledRegistrySourcesBeside(registryConnectionId)
 
     if (remoteProfiles.length === 0 && registrySources.length === 0) {
       return undefined // local fast path → batched endpoint's single DB open
@@ -15915,6 +15910,11 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles, registry
   return composeUnifiedSessionResponse(base, merged, offset, limit, total, profileTotals, remoteErrors, { archivedOnly })
 }
 
+// The pooled gateways an all-gateway list reads beside `registryConnectionId`.
+function pooledRegistrySourcesBeside(registryConnectionId) {
+  return pooledRegistrySessionSources(shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive()))
+}
+
 // Every CONNECTED registry gateway as a session source (see the module); never dials.
 async function pooledRegistrySessionSources(includeLocal = false): Promise<RegistrySessionSource[]> {
   const registry = readDesktopConnectionsRegistry()
@@ -15924,37 +15924,13 @@ async function pooledRegistrySessionSources(includeLocal = false): Promise<Regis
       connections: registry.connections,
       pool: backendPool.entries(),
       scopePrefix: backendScopePrefix,
-      reusedPrimary: connectionId => reusedPrimarySshDescriptor(registry, connectionId),
+      reusedPrimary: connectionId =>
+        reusedPrimarySshDescriptor(registry, connectionId, connectionId === registry.primary ? backendConnectionState.getPromise() : null),
       installId: (connectionId, descriptor) => boundedInstallId(probeConnectionInstallId(connectionId, descriptor)),
       sharedProfiles: sharedSshProfiles
     },
     includeLocal
   )
-}
-
-// The running primary descriptor when it IS this registry SSH connection: its
-// registry routes reuse it rather than pooling a backend. Never starts one.
-async function reusedPrimarySshDescriptor(registry, connectionId: string) {
-  const pending = connectionId === registry.primary ? backendConnectionState.getPromise() : null
-
-  if (!pending) {
-    return null
-  }
-
-  try {
-    const descriptor = await Promise.race([
-      pending,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('pending')), 2_000))
-    ])
-
-    return descriptor?.mode === 'remote' &&
-      descriptor.remoteKind === 'ssh' &&
-      registrySourceOwnsPrimaryBackend(registry, connectionId, descriptor)
-      ? descriptor
-      : null
-  } catch {
-    return null
-  }
 }
 
 // RT-42: install_id of the backend the primary session aggregate reads (see the module).
@@ -16018,34 +15994,16 @@ async function teardownConnectionScopedProfileBackend(connectionId, profile) {
   ])
 }
 
-// The Scheduled jobs list across every connected gateway: the front
-// connection's own answer, then each other CONNECTED registry gateway's jobs,
-// each tagged with the connection that serves it so its per-job calls route
-// there (cron-job-union.ts). Before this the list asked only the connection in
-// front, so a Bot's jobs on an SSH host never showed while you read a chat on
-// another connection. Same never-dial sources as the unified Sessions list.
+// The front connection's answer; the all-profiles job list also gets every
+// connected gateway's jobs (cron-job-union.ts).
 async function handleHermesApiRequest(request) {
-  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
-    return handleFrontHermesApiRequest(request)
-  }
-
-  const own = await handleFrontHermesApiRequest(request)
-  const registryConnectionId = apiRequestRegistryConnectionId(request)
-
-  const sources = await pooledRegistrySessionSources(
-    shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
-  )
-
-  const frontBackendId = registryConnectionId
-    ? sources.find(source => source.connectionId === registryConnectionId)?.backendId
-    : await primaryBackendInstallId()
-
-  return mergeRegistryCronJobs(
-    own,
-    sources,
-    (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 }),
-    { backendId: frontBackendId, connectionId: registryConnectionId || null }
-  )
+  return answerWithEveryGatewaysCronJobs(request, {
+    front: handleFrontHermesApiRequest,
+    registryConnectionId: apiRequestRegistryConnectionId,
+    pooledSources: pooledRegistrySourcesBeside,
+    primaryBackendId: primaryBackendInstallId,
+    getJson: (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 })
+  })
 }
 
 async function handleFrontHermesApiRequest(request) {

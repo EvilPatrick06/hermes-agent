@@ -17,6 +17,7 @@
  * in so forced-local backends remain visible when the legacy primary is remote.
  */
 
+import { registrySourceOwnsPrimaryBackend } from './connection-registry'
 import type { RegistrySessionSource } from './profile-session-routing'
 
 type SessionBackend = RegistrySessionSource['backends'][number]
@@ -82,4 +83,29 @@ export async function collectRegistrySessionSources(
   }
 
   return sources
+}
+
+/** The running primary descriptor when it IS this registry SSH connection: its
+ *  registry routes reuse it rather than pooling a backend. Never starts one.
+ *  `pending` is the primary's descriptor promise when `connectionId` is the
+ *  registry primary, else null. Moved here from main.ts (code-health size ratchet). */
+export async function reusedPrimarySshDescriptor(registry, connectionId: string, pending: null | Promise<any>) {
+  if (!pending) {
+    return null
+  }
+
+  try {
+    const descriptor = await Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('pending')), 2_000))
+    ])
+
+    return descriptor?.mode === 'remote' &&
+      descriptor.remoteKind === 'ssh' &&
+      registrySourceOwnsPrimaryBackend(registry, connectionId, descriptor)
+      ? descriptor
+      : null
+  } catch {
+    return null
+  }
 }
